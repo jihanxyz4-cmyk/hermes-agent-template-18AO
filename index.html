@@ -2328,10 +2328,8 @@ function app() {
             list.push({ providerKey: name, name, model: this.vars['_MODEL_XAI_OAUTH'] || '', isOauth: true });
           }
         } else if (p.isCustom && this.vars[p.key]) {
-          const slotNum = p.name.replace('Custom Endpoint ', '');
-          const displayName = (this.vars['CUSTOM_PROVIDER'+slotNum+'_NAME'] || this.vars.CUSTOM_PROVIDER_NAME || this.vars.CUSTOM_PROVIDER_BASE_URL || 'Custom Endpoint ' + slotNum);
-          const modelKeyVal = this.vars[p.modelKey] || this.vars['CUSTOM_PROVIDER'+slotNum+'_MODEL'] || '';
-          list.push({ providerKey: name, name: displayName, model: modelKeyVal, key: p.key, isCustom: true });
+          const displayName = this.vars.CUSTOM_PROVIDER_NAME || this.vars.CUSTOM_PROVIDER_BASE_URL || 'Custom Endpoint';
+          list.push({ providerKey: name, name: displayName, model: p.modelKey ? (this.vars[p.modelKey] || '') : '', key: p.key, isCustom: true });
         } else if (p.isRouter && this.vars[p.key] && this.vars[p.baseUrlKey]) {
           list.push({ providerKey: name, name, model: p.modelKey ? (this.vars[p.modelKey] || '') : '', key: p.key, isRouter: true });
         } else if (p.isAzure && this.vars[p.key] && this.vars.AZURE_FOUNDRY_BASE_URL) {
@@ -2384,19 +2382,8 @@ function app() {
       if (p.key)      this.vars[p.key]      = '';
       if (p.modelKey) this.vars[p.modelKey] = '';
       if (p.isCustom) {
-        const slotNum = p.name.replace('Custom Endpoint ', '');
-        this.vars.CUSTOM_PROVIDER_NAME = '';
         this.vars.CUSTOM_PROVIDER_BASE_URL = '';
-        if (slotNum) {
-          this.vars['CUSTOM_PROVIDER'+slotNum+'_NAME'] = '';
-          this.vars['CUSTOM_PROVIDER'+slotNum+'_API_KEY'] = '';
-          this.vars['CUSTOM_PROVIDER'+slotNum+'_BASE_URL'] = '';
-          this.vars['CUSTOM_PROVIDER'+slotNum+'_MODEL'] = '';
-        } else {
-          this.vars.CUSTOM_PROVIDER_NAME = '';
-          this.vars.CUSTOM_PROVIDER_API_KEY = '';
-          this.vars.CUSTOM_PROVIDER_BASE_URL = '';
-        }
+        this.vars.CUSTOM_PROVIDER_NAME     = '';
       }
       if (p.isBedrock) {
         this.vars.AWS_SECRET_ACCESS_KEY = '';
