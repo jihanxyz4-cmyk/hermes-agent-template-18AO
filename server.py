@@ -1515,6 +1515,14 @@ async def logout(request: Request) -> Response:
 # (e.g. a bad provider key / model).
 RESPAWN_WINDOW_S   = 120     # rolling window (s) for counting unexpected exits
 RESPAWN_MAX_IN_WIN = 5       # give up auto-restart after this many exits in window
+
+# Dashboard respawn tuning. The dashboard has no other supervisor (unlike the
+# gateway, which hermes itself can revive), so server.py is the only thing that
+# can bring it back. Tighter budget than the gateway's on purpose: a dashboard
+# that cannot start twice in a row will not start on the fifth try either.
+DASHBOARD_RESPAWN_MAX_IN_WIN = 5
+DASHBOARD_RESPAWN_WINDOW_S = 60.0
+DASHBOARD_RESPAWN_MAX_DELAY_S = 30.0
 RESPAWN_BASE_DELAY = 2.0     # first backoff (seconds)
 RESPAWN_MAX_DELAY  = 30.0    # backoff cap
 
@@ -1856,6 +1864,9 @@ class Dashboard:
         self.proc: asyncio.subprocess.Process | None = None
         self.logs: deque[str] = deque(maxlen=300)
         self._drain_task: asyncio.Task | None = None
+        # True while a deliberate stop()/restart() owns the lifecycle, so the
+        # exiting process's _drain() does not fire an auto-respawn that races it.
+        self._stopping = False
 
     async def start(self):
         if self.proc and self.proc.returncode is None:
@@ -1898,6 +1909,7 @@ class Dashboard:
                       "builds MCP OAuth redirects from the loopback address and those "
                       "sign-ins will not complete", flush=True)
             self._drain_task = asyncio.create_task(self._drain())
+            self._stopping = False
         except Exception as e:
             print(f"[dashboard] FAILED to spawn: {e!r}", flush=True)
 
@@ -1917,10 +1929,52 @@ class Dashboard:
                 print(f"[dashboard] EXITED with code {rc} — reverse proxy will return 503 until restart", flush=True)
             elif rc == 0:
                 print(f"[dashboard] exited cleanly (code 0)", flush=True)
+            # Unexpected exit: nothing else brings the dashboard back on Railway,
+            # so the reverse proxy 503s every proxied page until a full redeploy.
+            # Supervise it like the gateway (bounded respawn + backoff); only a
+            # deliberate stop()/restart() owns the lifecycle.
+            if rc is not None and rc != 0 and not self._stopping:
+                print("[dashboard] unexpected exit — supervising restart", flush=True)
+                asyncio.create_task(self._supervise_respawn())
+
+    async def _supervise_respawn(self):
+        """Bring the dashboard back after an unexpected exit, with backoff.
+
+        Mirrors Gateway._supervise_respawn(): a rolling-window exit count bounds
+        the retries so a permanently broken dashboard cannot spin forever, and the
+        deliberate-lifecycle check is re-evaluated AFTER the backoff sleep so a
+        Stop/Restart issued during the wait wins over the respawn.
+        """
+        if not hasattr(self, "_recent_exits"):
+            self._recent_exits: deque[float] = deque(maxlen=DASHBOARD_RESPAWN_MAX_IN_WIN)
+        now = time.monotonic()
+        self._recent_exits = deque(
+            (t for t in self._recent_exits if now - t < DASHBOARD_RESPAWN_WINDOW_S),
+            maxlen=DASHBOARD_RESPAWN_MAX_IN_WIN,
+        )
+        self._recent_exits.append(now)
+        if len(self._recent_exits) > DASHBOARD_RESPAWN_MAX_IN_WIN:
+            msg = (f"[dashboard] crash-looping ({len(self._recent_exits)} exits in "
+                   f"{int(DASHBOARD_RESPAWN_WINDOW_S)}s) — giving up auto-restart. "
+                   f"Check the Logs panel, then Start/Restart the gateway.")
+            self.logs.append(msg)
+            print(msg, flush=True)
+            return
+        attempt = len(self._recent_exits)
+        delay = min(2 ** (attempt - 1), DASHBOARD_RESPAWN_MAX_DELAY_S)
+        self.logs.append(f"[dashboard] restarting in {int(delay)}s (attempt {attempt})")
+        await asyncio.sleep(delay)
+        if self._stopping:
+            self.logs.append("[dashboard] restart cancelled (stopped/reconfigured)")
+            return
+        if self.proc and self.proc.returncode is None:
+            return  # a manual Start already brought a live dashboard back
+        await self.start()
 
     async def stop(self):
         if not self.proc or self.proc.returncode is not None:
             return
+        self._stopping = True
         self.proc.terminate()
         try:
             # v2026.9.21 joins its non-daemon state.db reconciliation worker on
@@ -2291,6 +2345,9 @@ async def api_gw_stop(request: Request):
 async def api_gw_restart(request: Request):
     if err := guard(request): return err
     asyncio.create_task(gw.restart())
+    # Restart the dashboard too: the reverse proxy 503s every proxied page while
+    # it is down, and a gateway restart is exactly when a user is watching the UI.
+    asyncio.create_task(dash.restart())
     return JSONResponse({"ok": True})
 
 
